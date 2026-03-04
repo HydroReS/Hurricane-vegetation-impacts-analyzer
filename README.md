@@ -13,6 +13,10 @@ For installation, configuration, and full usage instructions, see:
 
 - [Detailed project README](hurricane_vegetation_analysis/README.md)
 
+## Streamlit interface
+
+![Streamlit dashboard example](streamlit_dashboard_example.png)
+
 ## Development status and disclaimer
 
 This software is under active development and has not been exhaustively tested across all workflows or datasets.
