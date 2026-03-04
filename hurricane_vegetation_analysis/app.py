@@ -1385,94 +1385,100 @@ def _render_time_series_tab(impact_results: Dict[str, Any]) -> None:
     )
 
     if not run_ts:
-        st.info(
-            "Configure parameters above and click **Run Time Series Analysis**.\n\n"
-            "The analysis runs independently of the impact analysis — "
-            "it queries GEE again for the full time range."
-        )
-        return
-
-    if location is None:
-        st.error("No ROI available from the impact analysis. Select 'Enter a point' instead.")
-        return
-
-    if not anomaly_methods:
-        st.warning("Select at least one anomaly detection method.")
-        return
-
-    from src.time_series import run_time_series_analysis
-
-    # ── Effective scale (tier override) ──────────────────────────────────────
-    # For tier 3+ the recommended scale is ≥ 500 m; we take the larger of
-    # the user's choice and the tier minimum to avoid GEE timeouts.
-    _effective_scale = ts_scale
-    if _is_roi_mode and _roi_tier_info is not None:
-        _rec = _roi_tier_info["recommended_scale"]
-        if _rec > ts_scale:
-            _effective_scale = _rec
+        # If the SAR/PALSAR buttons were clicked the page reruns without
+        # run_ts being True.  Load cached results so the expanders remain visible.
+        if "ts_last_result" not in st.session_state:
             st.info(
-                f"Spatial resolution raised from {ts_scale} m to {_effective_scale} m "
-                "for this ROI size. Change the selector above to override."
+                "Configure parameters above and click **Run Time Series Analysis**.\n\n"
+                "The analysis runs independently of the impact analysis — "
+                "it queries GEE again for the full time range."
             )
+            return
+        ts = st.session_state["ts_last_result"]
+    else:
+        if location is None:
+            st.error("No ROI available from the impact analysis. Select 'Enter a point' instead.")
+            return
 
-    # ── Progress UI ──────────────────────────────────────────────────────────
-    # For point mode a single getRegion() call is used (no chunking needed).
-    # For ROI mode the date range is split into 6-month chunks; we show a
-    # progress bar that updates after each chunk is fetched from GEE.
-    _is_roi_mode = not isinstance(location, tuple)
-    _prog_bar   = st.progress(0, text="Connecting to Google Earth Engine…") \
-                  if _is_roi_mode else None
-    _prog_text  = st.empty() if _is_roi_mode else None
+        if not anomaly_methods:
+            st.warning("Select at least one anomaly detection method.")
+            return
 
-    def _progress_callback(done: int, total: int) -> None:
-        pct = int(done / total * 100)
-        _prog_bar.progress(
-            pct,
-            text=f"Fetching time series from GEE… chunk {done}/{total}",
-        )
-        if done == total:
-            _prog_text.text("Running decomposition and anomaly detection…")
+        from src.time_series import run_time_series_analysis
 
-    # Inherit water mask setting from the impact analysis configuration
-    _ts_proc = impact_results.get("config", {}).get("processing", {})
-    _ts_mask_water     = bool(_ts_proc.get("mask_water", False))
-    _ts_mask_threshold = int(_ts_proc.get("mask_water_threshold", 80))
+        # ── Effective scale (tier override) ──────────────────────────────────
+        # For tier 3+ the recommended scale is ≥ 500 m; we take the larger of
+        # the user's choice and the tier minimum to avoid GEE timeouts.
+        _effective_scale = ts_scale
+        if _is_roi_mode and _roi_tier_info is not None:
+            _rec = _roi_tier_info["recommended_scale"]
+            if _rec > ts_scale:
+                _effective_scale = _rec
+                st.info(
+                    f"Spatial resolution raised from {ts_scale} m to {_effective_scale} m "
+                    "for this ROI size. Change the selector above to override."
+                )
 
-    try:
-        with st.spinner("Running decomposition and anomaly detection…") \
-                if not _is_roi_mode else _nullcontext():
-            ts = run_time_series_analysis(
-                location=location,
-                start_date=start_date,
-                end_date=end_date,
-                satellite=satellite,
-                index=index,
-                composite=composite,
-                anomaly_methods=anomaly_methods,
-                anomaly_threshold=anomaly_threshold,
-                detect_changepoints=detect_cp,
-                event_date=event_date,
-                recovery_analysis=do_recovery,
-                recovery_style=recovery_style,
-                scale=_effective_scale,
-                output_dir=None,  # no file output; display inline
-                progress_callback=_progress_callback if _is_roi_mode else None,
-                mask_water=_ts_mask_water,
-                mask_water_threshold=_ts_mask_threshold,
+        # ── Progress UI ──────────────────────────────────────────────────────
+        # For point mode a single getRegion() call is used (no chunking needed).
+        # For ROI mode the date range is split into 6-month chunks; we show a
+        # progress bar that updates after each chunk is fetched from GEE.
+        _is_roi_mode = not isinstance(location, tuple)
+        _prog_bar   = st.progress(0, text="Connecting to Google Earth Engine…") \
+                      if _is_roi_mode else None
+        _prog_text  = st.empty() if _is_roi_mode else None
+
+        def _progress_callback(done: int, total: int) -> None:
+            pct = int(done / total * 100)
+            _prog_bar.progress(
+                pct,
+                text=f"Fetching time series from GEE… chunk {done}/{total}",
             )
-    except Exception as exc:
-        if _prog_bar:
-            _prog_bar.empty()
-        if _prog_text:
-            _prog_text.empty()
-        st.error(f"Time series analysis failed: {exc}")
-        logging.getLogger("app").exception("Time series error")
-        return
-    finally:
-        if _prog_bar:
-            _prog_bar.empty()
-        if _prog_text:
-            _prog_text.empty()
+            if done == total:
+                _prog_text.text("Running decomposition and anomaly detection…")
+
+        # Inherit water mask setting from the impact analysis configuration
+        _ts_proc = impact_results.get("config", {}).get("processing", {})
+        _ts_mask_water     = bool(_ts_proc.get("mask_water", False))
+        _ts_mask_threshold = int(_ts_proc.get("mask_water_threshold", 80))
+
+        try:
+            with st.spinner("Running decomposition and anomaly detection…") \
+                    if not _is_roi_mode else _nullcontext():
+                ts = run_time_series_analysis(
+                    location=location,
+                    start_date=start_date,
+                    end_date=end_date,
+                    satellite=satellite,
+                    index=index,
+                    composite=composite,
+                    anomaly_methods=anomaly_methods,
+                    anomaly_threshold=anomaly_threshold,
+                    detect_changepoints=detect_cp,
+                    event_date=event_date,
+                    recovery_analysis=do_recovery,
+                    recovery_style=recovery_style,
+                    scale=_effective_scale,
+                    output_dir=None,  # no file output; display inline
+                    progress_callback=_progress_callback if _is_roi_mode else None,
+                    mask_water=_ts_mask_water,
+                    mask_water_threshold=_ts_mask_threshold,
+                )
+        except Exception as exc:
+            if _prog_bar:
+                _prog_bar.empty()
+            if _prog_text:
+                _prog_text.empty()
+            st.error(f"Time series analysis failed: {exc}")
+            logging.getLogger("app").exception("Time series error")
+            return
+        finally:
+            if _prog_bar:
+                _prog_bar.empty()
+            if _prog_text:
+                _prog_text.empty()
+
+        st.session_state["ts_last_result"] = ts
 
     df = ts["df"]
     anomalies = ts["anomalies"]
@@ -1710,7 +1716,13 @@ def _render_time_series_tab(impact_results: Dict[str, Any]) -> None:
                         st.error(f"SAR extraction failed: {exc}")
 
             _sar_series = st.session_state.get("ts_sar_df")
-            if _sar_series is not None and not _sar_series.empty:
+            if _sar_series is not None and _sar_series.empty:
+                st.warning(
+                    "No Sentinel-1 data found for this point / date range / orbit. "
+                    "Try switching the orbit direction in config.yaml "
+                    f"(currently: {_sar_orbit})."
+                )
+            elif _sar_series is not None and not _sar_series.empty:
                 st.success(f"{len(_sar_series)} SAR observations retrieved.")
 
                 import matplotlib.pyplot as plt
@@ -1795,7 +1807,13 @@ def _render_time_series_tab(impact_results: Dict[str, Any]) -> None:
                         st.error(f"PALSAR extraction failed: {exc}")
 
             _palsar_series = st.session_state.get("ts_palsar_df")
-            if _palsar_series is not None and not _palsar_series.empty:
+            if _palsar_series is not None and _palsar_series.empty:
+                st.warning(
+                    "No PALSAR data found for this ROI / year range. "
+                    "Verify that the ROI overlaps a PALSAR acquisition path "
+                    "and that start year ≥ 2014 for PALSAR-2."
+                )
+            elif _palsar_series is not None and not _palsar_series.empty:
                 st.success(f"{len(_palsar_series)} annual PALSAR observations.")
 
                 import matplotlib.pyplot as _mplt
