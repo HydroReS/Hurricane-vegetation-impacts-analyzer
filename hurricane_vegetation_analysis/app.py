@@ -1433,6 +1433,11 @@ def _render_time_series_tab(impact_results: Dict[str, Any]) -> None:
         if done == total:
             _prog_text.text("Running decomposition and anomaly detection…")
 
+    # Inherit water mask setting from the impact analysis configuration
+    _ts_proc = impact_results.get("config", {}).get("processing", {})
+    _ts_mask_water     = bool(_ts_proc.get("mask_water", False))
+    _ts_mask_threshold = int(_ts_proc.get("mask_water_threshold", 80))
+
     try:
         with st.spinner("Running decomposition and anomaly detection…") \
                 if not _is_roi_mode else _nullcontext():
@@ -1452,6 +1457,8 @@ def _render_time_series_tab(impact_results: Dict[str, Any]) -> None:
                 scale=_effective_scale,
                 output_dir=None,  # no file output; display inline
                 progress_callback=_progress_callback if _is_roi_mode else None,
+                mask_water=_ts_mask_water,
+                mask_water_threshold=_ts_mask_threshold,
             )
     except Exception as exc:
         if _prog_bar:
@@ -1918,11 +1925,18 @@ def main():
     if st.session_state.results is not None:
         results = st.session_state.results
 
-        # Show ROI area in sidebar so the user is always aware of the scale
-        _roi_area_km2 = results.get("roi_area_km2")
+        # Show ROI area (and land area when water masking is active) in sidebar
+        _roi_area_km2  = results.get("roi_area_km2")
+        _land_area_km2 = results.get("land_area_km2")
         if _roi_area_km2 is not None:
             st.sidebar.markdown("---")
             st.sidebar.metric("📐 ROI Area", f"{_roi_area_km2:,.1f} km²")
+            if _land_area_km2 is not None:
+                _land_pct = _land_area_km2 / max(_roi_area_km2, 1) * 100
+                st.sidebar.caption(
+                    f"🌿 Land: {_land_area_km2:,.1f} km² ({_land_pct:.0f}%) "
+                    "— water pixels excluded"
+                )
 
         # Summary banner
         stat = results.get("statistics", {})

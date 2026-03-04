@@ -894,36 +894,33 @@ def run_analysis(
     logger.info("Index      : %s", index)
     logger.info("Output dir : %s", out)
 
-    # 1. Data acquisition
+    # 1. Data acquisition — land mask applied per-image inside get_composites
+    #    when mask_water=True, so water pixels never enter the median composite.
     logger.info("--- Step 1: Acquiring composites ---")
     pre_img, post_img, pre_optical_meta, post_optical_meta = get_composites(
         roi, event_date, satellite=satellite,
         pre_days=pre_days, post_days=post_days, buffer_days=buffer_days,
+        mask_water=mask_water, mask_water_threshold=mask_water_threshold,
     )
 
-    # 1b. Optional water mask (JRC Global Surface Water, occurrence > 80%)
-    #
-    # Two fixes vs the naive implementation:
-    # (a) .unmask(0) — pixels with NO JRC data (small islands, data gaps) are
-    #     treated as land (0% water occurrence) instead of being masked out.
-    #     Without this, island pixels that the JRC dataset never observed
-    #     appear as masked → propagates through .Not() → island is blanked.
-    # (b) Threshold 80 (not 50) — permanent water bodies (ocean, large lakes)
-    #     have occurrence ≈ 90–100%.  Using 50 incorrectly removes tidal flats,
-    #     mangroves, and coastal marshes — exactly the vegetation we want to
-    #     study.  80 keeps those habitats while still removing open water.
+    # 1b. Build land mask once for reuse in structural analysis and area reporting.
+    #     (get_composites builds its own internally; we build a matching instance
+    #      here so downstream callers don't need their own copy.)
+    land_mask = None
     if mask_water:
-        import ee as _ee
-        jrc_water = (
-            _ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
-            .select("occurrence")
-            .unmask(0)                      # no-data → 0% occurrence (treat as land)
-            .gt(mask_water_threshold)       # configurable via processing.mask_water_threshold
-        )
-        not_water = jrc_water.Not()
-        pre_img  = pre_img.updateMask(not_water)
-        post_img = post_img.updateMask(not_water)
-        logger.info("Water mask applied (JRC GSW occurrence > %d%%).", mask_water_threshold)
+        from .data_acquisition import build_jrc_land_mask, compute_land_area_km2
+        land_mask = build_jrc_land_mask(mask_water_threshold)
+        try:
+            _total_area = roi.area(maxError=100).getInfo() / 1e6
+            _land_area  = compute_land_area_km2(roi, land_mask, scale=500)
+            logger.info(
+                "ROI: %.1f km² total, %.1f km² land (%.0f%%). "
+                "Water pixels excluded from analysis.",
+                _total_area, _land_area, _land_area / max(_total_area, 1) * 100,
+            )
+        except Exception as _exc:
+            logger.warning("Land area computation failed: %s", _exc)
+            _land_area = None
 
     # 2. Vegetation index
     logger.info("--- Step 2: Computing %s ---", index)
@@ -997,6 +994,8 @@ def run_analysis(
         "scene_metadata": {
             "optical": {"pre": pre_optical_meta, "post": post_optical_meta},
         },
+        # Land area (set when mask_water=True)
+        "land_area_km2": _land_area if mask_water else None,
         # GEE images (for visualization)
         "pre_img": pre_idx,
         "post_img": post_idx,
@@ -1032,6 +1031,7 @@ def run_analysis(
                 sensors=sensors,
                 palsar_pre_year=palsar_pre_year,
                 palsar_post_year=palsar_post_year,
+                land_mask=land_mask,
             )
             results["structural"] = structural
             # Merge structural scene_metadata (SAR / GEDI / PALSAR) into top-level dict

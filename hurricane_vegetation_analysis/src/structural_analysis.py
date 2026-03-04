@@ -85,6 +85,7 @@ def get_sar_composites(
     post_days: int = 60,
     buffer_days: int = 5,
     config: Optional[Dict] = None,
+    land_mask: Optional["ee.Image"] = None,
 ) -> Tuple["ee.Image", "ee.Image", Dict[str, Any], Dict[str, Any]]:
     """
     Acquire pre- and post-event Sentinel-1 SAR composites.
@@ -133,6 +134,10 @@ def get_sar_composites(
     post_meta = extract_sar_metadata(post_col_raw, post_start_s, post_end_s)
 
     def _make_composite(col: "ee.ImageCollection") -> "ee.Image":
+        # Apply land mask per-image before speckle filtering so water
+        # backscatter is excluded from both the speckle kernel and the mean.
+        if land_mask is not None:
+            col = col.map(lambda img: img.updateMask(land_mask))
         filtered = col.map(lambda img: _apply_speckle_filter(img, radius))
         linear   = filtered.map(_db_to_linear)
         mean_lin = linear.mean()
@@ -607,6 +612,7 @@ def get_palsar_images(
     pre_year: Optional[int] = None,
     post_year: Optional[int] = None,
     config: Optional[Dict] = None,
+    land_mask: Optional["ee.Image"] = None,
 ) -> Tuple["ee.Image", "ee.Image"]:
     """
     Retrieve calibrated (dB) PALSAR annual mosaic images for pre- and post-event.
@@ -652,8 +658,10 @@ def get_palsar_images(
         )
         meta = extract_palsar_metadata(year, event_date, col)
         # Use mosaic (yearly collection typically has one image per year)
-        img = col.mosaic()
-        return _calibrate_palsar(img, cal_offset), meta
+        img = _calibrate_palsar(col.mosaic(), cal_offset)
+        if land_mask is not None:
+            img = img.updateMask(land_mask)
+        return img, meta
 
     logger.info("Acquiring PALSAR: pre=%d, post=%d", pre_yr, post_yr)
     pre_palsar,  pre_meta  = _get_year_image(pre_yr)
@@ -915,6 +923,7 @@ def run_structural_analysis(
     sensors: str = "optical,sar",
     palsar_pre_year: Optional[int] = None,
     palsar_post_year: Optional[int] = None,
+    land_mask: Optional["ee.Image"] = None,
 ) -> Dict[str, Any]:
     """
     Run Sentinel-1 SAR, GEDI lidar, and/or ALOS PALSAR-2 structural analysis.
@@ -981,6 +990,7 @@ def run_structural_analysis(
         try:
             pre_sar, post_sar, sar_pre_meta, sar_post_meta = get_sar_composites(
                 roi, event_date, pre_days, post_days, buffer_days, cfg,
+                land_mask=land_mask,
             )
             diff_sar = compute_sar_change(pre_sar, post_sar)
             results.update({
@@ -1026,6 +1036,7 @@ def run_structural_analysis(
                 pre_year=palsar_pre_year,
                 post_year=palsar_post_year,
                 config=cfg,
+                land_mask=land_mask,
             )
             diff_palsar   = compute_palsar_change(pre_palsar, post_palsar)
             palsar_damage = classify_palsar_damage(diff_palsar, palsar_thresh)

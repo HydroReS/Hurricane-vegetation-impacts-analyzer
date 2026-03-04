@@ -69,15 +69,26 @@ def _build_indexed_collection(
     satellite: str,
     index: str,
     max_cloud_pct: float = 80.0,
+    land_mask: Optional["ee.Image"] = None,
 ) -> "ee.ImageCollection":
-    """Build a cloud-masked, vegetation-index-computed ImageCollection."""
+    """
+    Build a cloud-masked, land-masked, vegetation-index-computed
+    ImageCollection.
+
+    The land mask (when supplied) is applied inside the per-image
+    ``.map()`` function — after cloud masking, before the vegetation
+    index is computed — so that water pixels are excluded from all
+    downstream reductions.
+    """
     from .data_acquisition import get_sentinel2_collection, get_landsat_collection
     from .vegetation_indices import compute_index
 
     if satellite == "sentinel2":
-        collection = get_sentinel2_collection(roi, start, end, max_cloud_pct)
+        collection = get_sentinel2_collection(roi, start, end, max_cloud_pct,
+                                              land_mask=land_mask)
     else:
-        collection = get_landsat_collection(roi, start, end, max_cloud_pct)
+        collection = get_landsat_collection(roi, start, end, max_cloud_pct,
+                                            land_mask=land_mask)
 
     return collection.map(lambda img: compute_index(img, index, satellite))
 
@@ -91,6 +102,8 @@ def extract_point_time_series(
     index: str = "NDVI",
     scale: int = 30,
     max_cloud_pct: float = 80.0,
+    mask_water: bool = False,
+    mask_water_threshold: int = 80,
 ) -> pd.DataFrame:
     """
     Extract a vegetation index time series at a single point location.
@@ -120,12 +133,15 @@ def extract_point_time_series(
         Sorted by date; rows with missing values are dropped.
     """
     import ee
+    from .data_acquisition import build_jrc_land_mask
 
     point = ee.Geometry.Point([lon, lat])
     roi = point.buffer(scale * 2)
 
+    land_mask = build_jrc_land_mask(mask_water_threshold) if mask_water else None
     collection = _build_indexed_collection(
-        roi, start_date, end_date, satellite, index, max_cloud_pct
+        roi, start_date, end_date, satellite, index, max_cloud_pct,
+        land_mask=land_mask,
     )
 
     logger.info(
@@ -191,6 +207,8 @@ def extract_roi_time_series(
     scale: int = 30,
     max_cloud_pct: float = 80.0,
     progress_callback: Optional[Any] = None,
+    mask_water: bool = False,
+    mask_water_threshold: int = 80,
 ) -> pd.DataFrame:
     """
     Extract a spatially-averaged vegetation index time series over an ROI.
@@ -228,13 +246,17 @@ def extract_roi_time_series(
         ``satellite``.
     """
     import ee
+    from .data_acquisition import build_jrc_land_mask
 
+    land_mask = build_jrc_land_mask(mask_water_threshold) if mask_water else None
     collection = _build_indexed_collection(
-        roi, start_date, end_date, satellite, index, max_cloud_pct
+        roi, start_date, end_date, satellite, index, max_cloud_pct,
+        land_mask=land_mask,
     )
     logger.info(
-        "Extracting ROI time series for %s %s → %s (scale=%dm)",
+        "Extracting ROI time series for %s %s → %s (scale=%dm%s)",
         index, start_date, end_date, scale,
+        ", water masked" if mask_water else "",
     )
 
     def _reduce(image):
@@ -1450,6 +1472,8 @@ def run_time_series_analysis(
     hurricane_events: Optional[List[Dict]] = None,
     plot_type: str = "all",
     progress_callback: Optional[Any] = None,
+    mask_water: bool = False,
+    mask_water_threshold: int = 80,
 ) -> Dict[str, Any]:
     """
     Run the full time series analysis pipeline.
@@ -1510,7 +1534,8 @@ def run_time_series_analysis(
     if isinstance(location, tuple):
         lat, lon = location
         raw_df = extract_point_time_series(
-            lat, lon, start_date, end_date, satellite, index, scale=scale
+            lat, lon, start_date, end_date, satellite, index, scale=scale,
+            mask_water=mask_water, mask_water_threshold=mask_water_threshold,
         )
         location_label = f"Point ({lat:.4f}, {lon:.4f})"
     else:
@@ -1523,6 +1548,7 @@ def run_time_series_analysis(
             location, start_date, end_date, satellite, index,
             scale=roi_scale,
             progress_callback=progress_callback,
+            mask_water=mask_water, mask_water_threshold=mask_water_threshold,
         )
         location_label = "ROI spatial mean"
 

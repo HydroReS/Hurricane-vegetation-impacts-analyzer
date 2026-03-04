@@ -155,6 +155,23 @@ def _print_results(results: dict) -> None:
         elif "palsar_error" in structural:
             click.secho(f"  ✗ PALSAR failed: {structural['palsar_error']}", fg="yellow")
 
+    # Effective analysis area (when water masking was enabled)
+    _land_area = results.get("land_area_km2")
+    if _land_area is not None:
+        click.echo()
+        click.secho("  Effective Analysis Area:", bold=True)
+        # roi_area_km2 may have been stored by app.py; fall back gracefully
+        _roi_km2 = results.get("roi_area_km2")
+        if _roi_km2:
+            _pct = _land_area / max(_roi_km2, 1) * 100
+            click.echo(
+                f"    ROI: {_roi_km2:,.1f} km² total, "
+                f"{_land_area:,.1f} km² land ({_pct:.0f}%). "
+                "Water pixels excluded from analysis."
+            )
+        else:
+            click.echo(f"    Land area: {_land_area:,.1f} km². Water pixels excluded.")
+
     # Scene-level acquisition summary
     scene_meta = results.get("scene_metadata", {})
     if scene_meta:
@@ -869,6 +886,26 @@ def timeseries(
     if _effective_scale is None:
         _effective_scale = 250   # point mode default
 
+    # Water mask settings from config (applies to ROI mode; point is a tiny buffer)
+    _mask_water     = bool(cfg.get("processing", {}).get("mask_water", False))
+    _mask_threshold = int(cfg.get("processing",  {}).get("mask_water_threshold", 80))
+
+    # Report effective land area when water masking is active and we have an ROI
+    if _mask_water and roi_str is not None:
+        try:
+            from src.data_acquisition import build_jrc_land_mask, compute_land_area_km2
+            _lm = build_jrc_land_mask(_mask_threshold)
+            _land_area = compute_land_area_km2(location, _lm, scale=500)
+            _total_area_km2 = location.area(maxError=100).getInfo() / 1e6
+            _land_pct = _land_area / max(_total_area_km2, 1) * 100
+            click.echo(
+                f"  Land area : {_land_area:,.1f} km² of "
+                f"{_total_area_km2:,.1f} km² total ({_land_pct:.0f}%)"
+                " — water pixels excluded from analysis."
+            )
+        except Exception as exc:
+            logger.warning("Land area computation failed: %s", exc)
+
     # Filter hurricane catalog to analysis date range
     all_hurricanes = cfg.get("hurricane_events", [])
     visible_hurricanes = [
@@ -895,6 +932,8 @@ def timeseries(
             output_dir=str(out_dir),
             hurricane_events=visible_hurricanes,
             plot_type=plot_type,
+            mask_water=_mask_water,
+            mask_water_threshold=_mask_threshold,
         )
     except Exception as exc:
         click.secho(f"\nERROR: {exc}", fg="red", err=True)

@@ -35,7 +35,7 @@ all without downloading raw rasters locally.
 | **Satellites** | Sentinel-2 SR (10 m) and Landsat 8/9 C2 L2 (30 m) |
 | **Indices** | NDVI, EVI, SAVI, NDMI |
 | **Cloud masking** | QA60 + SCL (Sentinel-2); QA_PIXEL (Landsat) |
-| **Water masking** | Optional JRC Global Surface Water mask (excludes ocean, lakes, rivers) |
+| **Water masking** | Per-image JRC Global Surface Water mask applied before compositing — water pixels are excluded from cloud filtering, index computation, and median reduction; effective land area (km²) reported in sidebar and CLI |
 | **Compositing** | Median composite over configurable pre/post windows |
 | **Statistics** | Paired t-test, Wilcoxon signed-rank, Cohen's d |
 | **Classification** | 4-class severity map (No / Low / Moderate / Severe Impact) |
@@ -51,6 +51,7 @@ all without downloading raw rasters locally.
 | **Hurricane catalog** | YAML-driven event catalog; vertical markers auto-overlaid on every chart — add future events without touching code |
 | **Reporting** | Auto-generated HTML report with embedded figures |
 | **CLI** | `click`-based with presets for all major FL hurricanes; `--sensors` flag; `--palsar-pre-year` / `--palsar-post-year` overrides |
+| **ROI size advisory** | Automatic tier check before time series analysis: < 100 km² (normal), 100–500 km² (note), 500–2000 km² (auto-scale to 500 m, warn), > 2000 km² (confirmation required). ROI and land area displayed in sidebar |
 | **Dashboard** | Streamlit app with GEE live analysis, customizable ROI, PALSAR checkbox, Multi-Sensor tab, map-click point selection |
 | **Fallback** | Microsoft Planetary Computer (STAC) if GEE is unavailable |
 
@@ -67,16 +68,19 @@ hurricane_vegetation_analysis/
 ├── app.py                      # Streamlit dashboard
 ├── src/
 │   ├── __init__.py
-│   ├── utils.py                # Config loading, ROI parsing, GEE init, date math
-│   ├── data_acquisition.py     # Cloud masking, collection retrieval, compositing
+│   ├── utils.py                # Config loading, ROI parsing, GEE init, date math,
+│   │                           #   compute_roi_area_km2(), classify_roi_size()
+│   ├── data_acquisition.py     # Cloud masking, collection retrieval, compositing,
+│   │                           #   build_jrc_land_mask(), compute_land_area_km2()
 │   ├── vegetation_indices.py   # NDVI/EVI/SAVI/NDMI on ee.Image
 │   ├── analysis.py             # Δ map, stats, classification, baseline check
 │   ├── structural_analysis.py  # Sentinel-1 SAR, ALOS PALSAR-2, GEDI lidar,
 │   │                           #   4-class and 8-class concordance maps
 │   ├── visualization.py        # folium maps, matplotlib plots, Jinja2 HTML report
 │   │                           #   + SAR/PALSAR/concordance interactive maps
-│   └── time_series.py          # Temporal monitoring: extraction, STL/harmonic, anomaly
-│                               #   detection, CUSUM, recovery, SAR + PALSAR time series
+│   ├── time_series.py          # Temporal monitoring: extraction, STL/harmonic, anomaly
+│   │                           #   detection, CUSUM, recovery, SAR + PALSAR time series
+│   └── metadata_utils.py       # Sensor metadata tracking and composite provenance
 └── tests/
     ├── test_analysis.py        # 43 unit tests — impact analysis (no GEE required)
     └── test_time_series.py     # 25 unit tests — anomaly detection (no GEE required)
@@ -339,6 +343,11 @@ python cli.py analyze \
 Outputs `palsar_change_map.html` (∆HV dB sequential map) and
 `concordance_ext_map.html` (8-class extended concordance).
 
+**PALSAR sensor activation** — PALSAR is triggered by including `palsar` in the
+`--sensors` flag, either alone (`optical,palsar`) or combined with other sensors.
+The PALSAR checkbox in the Streamlit sidebar appends PALSAR regardless of which
+optical/SAR radio option is selected.
+
 **PALSAR year selection** — Yearly mosaics cover one calendar year.
 The tool auto-selects pre/post years from the event date:
 
@@ -479,6 +488,8 @@ Options:
   --recovery-style TEXT  seasonal | flat | all  [default: seasonal]
   --plot-type TEXT       raw | residual | zscore | departure | cusum | all  [default: all]
   --output-dir TEXT      Output directory  [default: ./results/timeseries]
+  --scale INTEGER        Override GEE reduction scale in metres (default: 250 or auto from ROI size)
+  --force                Skip the large-ROI confirmation prompt (> 2000 km²)
 ```
 
 ### Time series output files
@@ -524,11 +535,14 @@ The dashboard opens at `http://localhost:8501` and provides:
    - **Customize ROI**: When a preset is selected, an **"✏️ Customize ROI
      (optional)"** expander appears to override the preset bounding box.
    - **Upload ROI**: Accepts GeoJSON or a zipped shapefile.
-   - **Water masking**: Excludes permanent water pixels via JRC Global Surface Water.
+   - **Water masking**: Excludes permanent water pixels via JRC Global Surface Water
+     (applied per-image before compositing).
    - **Sensors radio**: Choose optical only, optical + SAR (Sentinel-1), or optical + SAR + GEDI.
    - **PALSAR-2 L-band checkbox**: Appends PALSAR to the sensor list.
      An optional expander lets you override the pre/post mosaic years
      (auto-selected from the event date when left blank).
+   - **ROI Area metric**: Always-visible sidebar card showing ROI size in km².
+     When water masking is active, a caption shows the effective land area (km² and %).
 2. **Run Analysis** button — Triggers the full GEE pipeline. Results are
    cached in `st.session_state`; switching tabs does not re-run GEE.
 3. **Map tab** — Interactive folium map with a built-in legend:
@@ -538,6 +552,9 @@ The dashboard opens at `http://localhost:8501` and provides:
 6. **Downloads tab** — Pre/post/difference GeoTIFFs, distribution plot, HTML report, CSV stats.
 7. **Time Series tab** — Independent multi-year temporal analysis:
    - **Location**: ROI spatial mean, manual lat/lon, or map-click point selection.
+   - **ROI size advisory**: Before running, the tab checks ROI area against four tiers
+     (< 100, 100–500, 500–2000, > 2000 km²). For tier 3 the resolution is automatically
+     raised to 500 m. For tier 4 a confirmation checkbox is required to proceed.
    - **Anomaly detection**: z-score, moving window, climatology — one or all three.
    - **Detrended views**: residual, z-score, seasonal departure, CUSUM, combined panel.
    - **Recovery analysis** with seasonal envelope or flat baseline selector.
@@ -633,10 +650,32 @@ All thresholds are configurable in `config.yaml`.
 
 ### Multi-Sensor Structural Analysis
 
+#### Water / Land Masking
+
+When `mask_water: true` is set in `config.yaml` (or `--mask-water` on the CLI), the
+JRC Global Surface Water occurrence layer (`JRC/GSW1_4/GlobalSurfaceWater`) is used
+to build a binary land mask at the start of the pipeline.
+
+- **Early application**: The mask is applied per-image — before cloud filtering, index
+  computation, or median reduction — so water pixels never enter any downstream GEE
+  operation.  Pixels with occurrence ≥ `mask_water_threshold` (default 80 %) are
+  excluded; pixels with no occurrence data (`unmask(0)`) are treated as land.
+- **All sensors**: The same land mask is applied to optical (Sentinel-2, Landsat),
+  C-band SAR (before the focal-median speckle filter), and PALSAR-2 pipelines.
+- **Land area reporting**: After masking, the effective land area is computed via
+  `ee.Image.pixelArea()` and reported in the sidebar (km² and % of ROI) and in
+  the CLI output line.
+- **Why per-image vs post-composite?**: For median compositing, masking per-image is
+  semantically correct — ocean pixels are excluded from the pixel stack used to
+  compute the median.  For SAR, masking before the focal-median speckle filter also
+  prevents low-backscatter ocean pixels from bleeding through the 50 m kernel into
+  adjacent coastal land pixels.
+
 #### Sentinel-1 SAR (C-band)
 
 - **Collection**: `COPERNICUS/S1_GRD`, IW mode, DESCENDING orbit
-- **Speckle filtering**: circular focal-median kernel (50 m radius)
+- **Speckle filtering**: circular focal-median kernel (50 m radius), applied after
+  per-image land masking when `mask_water` is enabled
 - **Compositing**: scenes converted from dB to linear scale (10^(dB/10)) before averaging,
   then converted back to dB — avoids the non-linear bias of averaging in dB space
 - **RVI**: RVI = 4·VH_linear / (VV_linear + VH_linear); sensitive to vegetation volume scattering;
@@ -807,7 +846,7 @@ No GEE connection required for any of the unit tests — all use synthetic
 numpy/pandas data.
 
 ```bash
-# Run all 68 tests with verbose output
+# Run all 68 tests with verbose output (no GEE connection required)
 python -m pytest tests/ -v
 
 # Run with coverage report
@@ -874,8 +913,15 @@ thresholds:
   moderate_impact: -0.30   # < -0.30 → Severe Impact
 
 processing:
-  mask_water: false          # Set to true to exclude permanent water bodies
+  mask_water: false          # Set to true to exclude permanent water bodies (per-image)
   mask_water_threshold: 80   # JRC occurrence % above which a pixel is water
+                             # (80 = open water excluded, mangroves / tidal flats retained)
+
+# ── ROI Size Tiers (time series) ─────────────────────────────────────────────
+# Tier 1: < 100 km²    → 250 m scale, proceed normally
+# Tier 2: 100–500 km²  → 250 m scale, note that computation may take a few minutes
+# Tier 3: 500–2000 km² → auto-scales to 500 m, warns user
+# Tier 4: > 2000 km²   → 500 m scale, requires --force (CLI) or checkbox (Streamlit)
 
 sensors_default: "optical"   # optical | optical,sar | optical,sar,gedi | optical,sar,gedi,palsar | all
 

@@ -80,11 +80,97 @@ def mask_sentinel2_clouds(image: "ee.Image") -> "ee.Image":
     return image.updateMask(combined_mask)
 
 
+def build_jrc_land_mask(threshold: int = 80) -> "ee.Image":
+    """
+    Build a binary land mask from the JRC Global Surface Water dataset.
+
+    Returns 1 for land (or unknown), 0 for permanent water.
+
+    Two safeguards vs the naive implementation:
+
+    * ``.unmask(0)`` — pixels with no JRC observations (small islands, data
+      gaps) are treated as 0 % water occurrence (i.e. land) rather than
+      being masked out.  Without this, island pixels that the JRC dataset
+      never observed appear as masked and propagate through the ``.Not()``
+      inversion.
+    * Threshold 80 (not 50) — permanent water bodies have occurrence ≈
+      90–100 %.  50 incorrectly removes tidal flats, mangroves, and coastal
+      marshes — exactly the vegetation of interest.  80 keeps those habitats
+      while reliably excluding open water.
+
+    Parameters
+    ----------
+    threshold : int
+        JRC occurrence percentage above which a pixel is classified as water
+        (default 80).
+
+    Returns
+    -------
+    ee.Image
+        Single-band binary image; 1 = land, 0 = water.
+    """
+    import ee
+
+    return (
+        ee.Image("JRC/GSW1_4/GlobalSurfaceWater")
+        .select("occurrence")
+        .unmask(0)           # no-data → 0 % (treat as land)
+        .gt(threshold)       # 1 = water, 0 = land
+        .Not()               # invert → 1 = land, 0 = water
+    )
+
+
+def compute_land_area_km2(
+    roi: "ee.Geometry",
+    land_mask: "ee.Image",
+    scale: int = 500,
+) -> float:
+    """
+    Estimate the land area (km²) within *roi* using a binary land mask.
+
+    Uses ``ee.Image.pixelArea()`` to accumulate the area of all unmasked
+    (land) pixels at the given *scale*.  A coarser scale (default 500 m)
+    keeps the ``reduceRegion`` call cheap while still giving a reliable
+    estimate.
+
+    Parameters
+    ----------
+    roi : ee.Geometry
+        Region of interest.
+    land_mask : ee.Image
+        Binary land mask (1 = land) as returned by :func:`build_jrc_land_mask`.
+    scale : int
+        Reduction scale in metres (default 500).
+
+    Returns
+    -------
+    float
+        Land area in square kilometres.
+    """
+    import ee
+
+    area_m2 = (
+        ee.Image(1)
+        .updateMask(land_mask)
+        .multiply(ee.Image.pixelArea())
+        .reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=roi,
+            scale=scale,
+            maxPixels=1e9,
+        )
+        .getInfo()
+        .get("constant", 0)
+    )
+    return (area_m2 or 0) / 1_000_000.0
+
+
 def get_sentinel2_collection(
     roi: "ee.Geometry",
     start: str,
     end: str,
     max_cloud_pct: float = 80.0,
+    land_mask: Optional["ee.Image"] = None,
 ) -> "ee.ImageCollection":
     """
     Build a cloud-masked Sentinel-2 SR ImageCollection for a given ROI and
@@ -102,6 +188,11 @@ def get_sentinel2_collection(
         Pre-filter by scene-level cloud percentage (default 80 %).  Lower
         values produce a smaller collection but more aggressively filtered
         composites.
+    land_mask : ee.Image, optional
+        Binary land mask (1 = land) applied to every image immediately after
+        cloud masking, before any band math or compositing.  Water pixels are
+        excluded from all downstream reductions.  If ``None``, no land
+        masking is applied.
 
     Returns
     -------
@@ -110,12 +201,18 @@ def get_sentinel2_collection(
     """
     import ee
 
+    def _preprocess(image):
+        img = mask_sentinel2_clouds(image)
+        if land_mask is not None:
+            img = img.updateMask(land_mask)
+        return img
+
     collection = (
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
         .filterBounds(roi)
         .filterDate(start, end)
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", max_cloud_pct))
-        .map(mask_sentinel2_clouds)
+        .map(_preprocess)
     )
     return collection
 
@@ -160,6 +257,7 @@ def get_landsat_collection(
     start: str,
     end: str,
     max_cloud_pct: float = 80.0,
+    land_mask: Optional["ee.Image"] = None,
 ) -> "ee.ImageCollection":
     """
     Build a merged, cloud-masked Landsat 8+9 Collection 2 Level-2
@@ -176,6 +274,9 @@ def get_landsat_collection(
         Date range (``YYYY-MM-DD``).
     max_cloud_pct : float
         Maximum scene-level cloud cover percentage.
+    land_mask : ee.Image, optional
+        Binary land mask applied per-image before compositing (see
+        :func:`get_sentinel2_collection`).
 
     Returns
     -------
@@ -184,13 +285,19 @@ def get_landsat_collection(
     """
     import ee
 
+    def _preprocess(image):
+        img = mask_landsat_clouds(image)
+        if land_mask is not None:
+            img = img.updateMask(land_mask)
+        return img
+
     def _filter_and_mask(collection_id: str) -> "ee.ImageCollection":
         return (
             ee.ImageCollection(collection_id)
             .filterBounds(roi)
             .filterDate(start, end)
             .filter(ee.Filter.lt("CLOUD_COVER", max_cloud_pct))
-            .map(mask_landsat_clouds)
+            .map(_preprocess)
         )
 
     lc08 = _filter_and_mask("LANDSAT/LC08/C02/T1_L2")
@@ -369,6 +476,8 @@ def get_composites(
     post_days: int = 60,
     buffer_days: int = 5,
     max_cloud_pct: float = 80.0,
+    mask_water: bool = False,
+    mask_water_threshold: int = 80,
 ) -> Tuple["ee.Image", "ee.Image", Dict, Dict]:
     """
     Retrieve pre-event and post-event median composites for a given ROI,
@@ -392,6 +501,13 @@ def get_composites(
         Days to exclude immediately around the event (default 5).
     max_cloud_pct : float
         Maximum scene-level cloud cover for pre-filtering.
+    mask_water : bool
+        If ``True``, apply the JRC land mask to every image before
+        compositing so that water pixels never contribute to the median.
+        Default ``False``.
+    mask_water_threshold : int
+        JRC occurrence percentage above which a pixel is treated as water
+        (default 80).
 
     Returns
     -------
@@ -413,6 +529,15 @@ def get_composites(
             f"Unknown satellite '{satellite}'. Use 'sentinel2' or 'landsat'."
         )
 
+    # Build land mask once so every image in both collections shares the same
+    # server-side expression (GEE deduplicates identical sub-graphs).
+    land_mask = build_jrc_land_mask(mask_water_threshold) if mask_water else None
+    if mask_water:
+        logger.info(
+            "Land mask enabled (JRC GSW occurrence > %d%%) — applied per-image "
+            "before compositing.", mask_water_threshold
+        )
+
     pre_start, pre_end, post_start, post_end = date_windows(
         event_date, pre_days=pre_days, post_days=post_days, buffer_days=buffer_days
     )
@@ -426,11 +551,11 @@ def get_composites(
     # Select collection builder
     if satellite == "sentinel2":
         _get_collection = lambda s, e: get_sentinel2_collection(
-            roi, s, e, max_cloud_pct=max_cloud_pct
+            roi, s, e, max_cloud_pct=max_cloud_pct, land_mask=land_mask
         )
     else:
         _get_collection = lambda s, e: get_landsat_collection(
-            roi, s, e, max_cloud_pct=max_cloud_pct
+            roi, s, e, max_cloud_pct=max_cloud_pct, land_mask=land_mask
         )
 
     pre_col = _get_collection(pre_start, pre_end)
