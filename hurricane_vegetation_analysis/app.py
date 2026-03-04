@@ -483,6 +483,10 @@ def _run_analysis(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             results["config"] = cfg
             results["roi_geom"] = roi_geom
             results["output_dir"] = out_dir
+            try:
+                results["roi_area_km2"] = roi_geom.area(maxError=100).getInfo() / 1e6
+            except Exception:
+                results["roi_area_km2"] = None
             return results
         except Exception as exc:
             st.error(f"Analysis failed: {exc}")
@@ -1352,7 +1356,33 @@ def _render_time_series_tab(impact_results: Dict[str, Any]) -> None:
         if start_date <= str(he.get("date", "")) <= end_date
     ]
 
-    run_ts = st.button("▶ Run Time Series Analysis", type="primary", key="ts_run")
+    # ── ROI size advisory ────────────────────────────────────────────────────
+    # Only applies when the user is working with the ROI spatial mean.
+    _is_roi_mode = location is not None and not isinstance(location, tuple)
+    _roi_tier_info = None
+    _large_roi_confirmed = True   # default: no confirmation needed
+
+    if _is_roi_mode:
+        _roi_area_km2 = impact_results.get("roi_area_km2")
+        if _roi_area_km2 is not None:
+            from src.utils import classify_roi_size as _classify_roi
+            _roi_tier_info = _classify_roi(_roi_area_km2)
+            if _roi_tier_info["note"]:
+                st.info(_roi_tier_info["note"])
+            if _roi_tier_info["warning"]:
+                st.warning(_roi_tier_info["warning"])
+            if _roi_tier_info["requires_confirm"]:
+                _large_roi_confirmed = st.checkbox(
+                    "I understand this ROI is very large — proceed anyway",
+                    key="ts_large_roi_confirm",
+                )
+
+    run_ts = st.button(
+        "▶ Run Time Series Analysis",
+        type="primary",
+        key="ts_run",
+        disabled=not _large_roi_confirmed,
+    )
 
     if not run_ts:
         st.info(
@@ -1371,6 +1401,19 @@ def _render_time_series_tab(impact_results: Dict[str, Any]) -> None:
         return
 
     from src.time_series import run_time_series_analysis
+
+    # ── Effective scale (tier override) ──────────────────────────────────────
+    # For tier 3+ the recommended scale is ≥ 500 m; we take the larger of
+    # the user's choice and the tier minimum to avoid GEE timeouts.
+    _effective_scale = ts_scale
+    if _is_roi_mode and _roi_tier_info is not None:
+        _rec = _roi_tier_info["recommended_scale"]
+        if _rec > ts_scale:
+            _effective_scale = _rec
+            st.info(
+                f"Spatial resolution raised from {ts_scale} m to {_effective_scale} m "
+                "for this ROI size. Change the selector above to override."
+            )
 
     # ── Progress UI ──────────────────────────────────────────────────────────
     # For point mode a single getRegion() call is used (no chunking needed).
@@ -1406,7 +1449,7 @@ def _render_time_series_tab(impact_results: Dict[str, Any]) -> None:
                 event_date=event_date,
                 recovery_analysis=do_recovery,
                 recovery_style=recovery_style,
-                scale=ts_scale,
+                scale=_effective_scale,
                 output_dir=None,  # no file output; display inline
                 progress_callback=_progress_callback if _is_roi_mode else None,
             )
@@ -1874,6 +1917,12 @@ def main():
     # Render results (if available)
     if st.session_state.results is not None:
         results = st.session_state.results
+
+        # Show ROI area in sidebar so the user is always aware of the scale
+        _roi_area_km2 = results.get("roi_area_km2")
+        if _roi_area_km2 is not None:
+            st.sidebar.markdown("---")
+            st.sidebar.metric("📐 ROI Area", f"{_roi_area_km2:,.1f} km²")
 
         # Summary banner
         stat = results.get("statistics", {})

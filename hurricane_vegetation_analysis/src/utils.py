@@ -408,3 +408,75 @@ def bbox_to_list(bbox: List[float]) -> List[float]:
             "west must be < east and south must be < north."
         )
     return [float(west), float(south), float(east), float(north)]
+
+
+# ---------------------------------------------------------------------------
+# ROI area helpers
+# ---------------------------------------------------------------------------
+
+def compute_roi_area_km2(roi_geom) -> float:
+    """Return the area of a GEE geometry in square kilometres."""
+    area_m2 = roi_geom.area(maxError=100).getInfo()
+    return area_m2 / 1_000_000.0
+
+
+def classify_roi_size(area_km2: float) -> Dict[str, Any]:
+    """
+    Classify ROI area and return recommended time series computation settings.
+
+    Tiers
+    -----
+    1 (< 100 km²)    : Normal — 250 m, single fetch.
+    2 (100–500 km²)  : Moderate — 250 m with batching; may take a few minutes.
+    3 (500–2000 km²) : Large — auto-scale to 500 m + batching.
+    4 (≥ 2000 km²)   : Very large — 500 m, batch; requires explicit confirmation.
+
+    Returns
+    -------
+    dict
+        ``tier`` (int 1–4), ``recommended_scale`` (int, metres),
+        ``note`` (str or None), ``warning`` (str or None),
+        ``requires_confirm`` (bool).
+    """
+    if area_km2 < 100:
+        return {
+            "tier": 1,
+            "recommended_scale": 250,
+            "note":    None,
+            "warning": None,
+            "requires_confirm": False,
+        }
+    elif area_km2 < 500:
+        return {
+            "tier": 2,
+            "recommended_scale": 250,
+            "note": (
+                f"ROI is {area_km2:.0f} km². Batching enabled — "
+                "computation may take a few minutes."
+            ),
+            "warning": None,
+            "requires_confirm": False,
+        }
+    elif area_km2 < 2000:
+        return {
+            "tier": 3,
+            "recommended_scale": 500,
+            "note":    None,
+            "warning": (
+                f"Large ROI ({area_km2:.0f} km²): resolution auto-scaled to "
+                "500 m to avoid GEE timeout."
+            ),
+            "requires_confirm": False,
+        }
+    else:
+        return {
+            "tier": 4,
+            "recommended_scale": 500,
+            "note":    None,
+            "warning": (
+                f"Very large ROI ({area_km2:.0f} km²): time series extraction "
+                "will be slow. Consider a smaller ROI or switching to monthly "
+                "compositing."
+            ),
+            "requires_confirm": True,
+        }

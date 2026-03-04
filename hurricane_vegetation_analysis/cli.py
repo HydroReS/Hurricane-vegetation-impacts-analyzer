@@ -709,6 +709,14 @@ def run_preset(ctx, preset_name, index, satellite, output_dir, config_path,
                   "'residual'/'zscore'/'departure'/'cusum' = one detrended view; "
                   "'all' = raw + all four detrended types + combined panel."
               ))
+@click.option("--scale", type=int, default=None,
+              help=(
+                  "GEE reduction scale in metres for ROI mode. "
+                  "Auto-set by ROI size if not specified "
+                  "(250 m for < 500 km², 500 m for ≥ 500 km²)."
+              ))
+@click.option("--force", is_flag=True, default=False,
+              help="Skip the confirmation prompt for very large ROIs (> 2000 km²).")
 @click.option("--config", "config_path", default=str(_CONFIG_DEFAULT), show_default=True)
 @click.option("--gee-project", default=None, help="GEE Cloud project ID.")
 @click.option("--verbose", "-v", is_flag=True, default=False)
@@ -717,6 +725,7 @@ def timeseries(
     start_date, end_date, index, satellite, composite,
     anomaly_method, anomaly_threshold, detect_changepoints,
     event_date, recovery_analysis, recovery_style, output_dir, plot_type,
+    scale, force,
     config_path, gee_project, verbose,
 ):
     """
@@ -827,6 +836,39 @@ def timeseries(
             click.secho(f"ERROR parsing ROI: {exc}", fg="red", err=True)
             sys.exit(1)
 
+    # ── ROI size check (only for ROI mode) ───────────────────────────────────
+    _effective_scale = scale  # None means "use function default"
+    if roi_str is not None:
+        try:
+            from src.utils import compute_roi_area_km2, classify_roi_size
+            _roi_area = compute_roi_area_km2(location)
+            _tier = classify_roi_size(_roi_area)
+            click.echo(f"  ROI area : {_roi_area:,.1f} km²  (tier {_tier['tier']})")
+            if _tier["note"]:
+                click.echo(f"  Note     : {_tier['note']}")
+            if _tier["warning"]:
+                click.secho(f"  Warning  : {_tier['warning']}", fg="yellow")
+            if _tier["requires_confirm"] and not force:
+                click.confirm(
+                    "\nROI is very large — analysis will be slow. Proceed?",
+                    abort=True,
+                )
+            # Use the explicitly supplied --scale; fall back to tier recommendation
+            if _effective_scale is None:
+                _effective_scale = _tier["recommended_scale"]
+                if _tier["recommended_scale"] != 250:
+                    click.echo(
+                        f"  Scale    : {_effective_scale} m "
+                        "(auto-set by ROI size; override with --scale)"
+                    )
+        except Exception as exc:
+            logger.warning("ROI area check failed: %s", exc)
+            if _effective_scale is None:
+                _effective_scale = 250
+
+    if _effective_scale is None:
+        _effective_scale = 250   # point mode default
+
     # Filter hurricane catalog to analysis date range
     all_hurricanes = cfg.get("hurricane_events", [])
     visible_hurricanes = [
@@ -849,6 +891,7 @@ def timeseries(
             event_date=event_date,
             recovery_analysis=recovery_analysis,
             recovery_style=recovery_style,
+            scale=_effective_scale,
             output_dir=str(out_dir),
             hurricane_events=visible_hurricanes,
             plot_type=plot_type,
