@@ -1,0 +1,51 @@
+# Hurricane Vegetation Analysis — Python Dependencies
+# Install with: pip install -r requirements.txt
+#
+# Python ≥ 3.10 recommended.
+# GEE authentication required: run `earthengine authenticate` after install.
+
+# ── Google Earth Engine ────────────────────────────────────────────────────
+earthengine-api==0.1.396
+
+# ── GEE-to-Python interop & visualization ─────────────────────────────────
+geemap==0.33.0
+
+# ── Geospatial data handling ───────────────────────────────────────────────
+geopandas==0.14.4
+rasterio==1.3.10
+pyproj==3.6.1
+shapely==2.0.4
+fiona==1.9.6
+
+# ── Data science & statistics ─────────────────────────────────────────────
+pandas==2.2.2
+numpy==1.26.4
+scipy==1.13.1
+statsmodels==0.14.2
+
+# ── Visualization ─────────────────────────────────────────────────────────
+matplotlib==3.9.0
+plotly==5.22.0
+folium==0.17.0
+
+# ── CLI ───────────────────────────────────────────────────────────────────
+click==8.1.7
+
+# ── Configuration ─────────────────────────────────────────────────────────
+pyyaml==6.0.1
+
+# ── Report templating ─────────────────────────────────────────────────────
+jinja2==3.1.4
+
+# ── Streamlit dashboard ───────────────────────────────────────────────────
+streamlit==1.35.0
+streamlit-folium==0.21.0
+
+# ── Planetary Computer fallback (optional) ────────────────────────────────
+pystac-client==0.7.7
+planetary-computer==1.0.0
+stackstac==0.5.1
+
+# ── Testing ───────────────────────────────────────────────────────────────
+pytest==8.2.2
+pytest-cov==5.0.0

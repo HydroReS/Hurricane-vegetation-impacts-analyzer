@@ -1,0 +1,197 @@
+# Hurricane Vegetation Analysis — Default Configuration
+# All values can be overridden via CLI arguments.
+
+# ── Google Earth Engine ──────────────────────────────────────────────────────
+gee:
+  project: "vegetation-impact-analysis"
+
+# ── Analysis Windows ─────────────────────────────────────────────────────────
+windows:
+  pre_days: 60          # days to look back from (event_date - buffer_days)
+  post_days: 60         # days to look forward from (event_date + buffer_days)
+  buffer_days: 5        # days around event to exclude (storm itself)
+
+# ── Satellite / Sensor ───────────────────────────────────────────────────────
+satellite: "sentinel2"  # choices: sentinel2 | landsat
+index: "NDVI"           # choices: NDVI | EVI | SAVI | NDMI
+
+# ── Statistical Testing ──────────────────────────────────────────────────────
+statistics:
+  significance_level: 0.05
+  sample_size: 500        # number of pixels to sample locally for tests
+  min_sample_size: 30     # below this, skip inferential tests with a warning
+  historical_years: 3     # years prior to event used for baseline variability
+
+# ── Impact Classification Thresholds (delta index values) ────────────────────
+# Values apply to any index (NDVI, EVI, SAVI, NDMI).
+# Negative values indicate vegetation loss.
+thresholds:
+  no_impact: -0.05        # > -0.05  → No Impact (class 0)
+  low_impact: -0.15       # -0.05 to -0.15 → Low Impact (class 1)
+  moderate_impact: -0.30  # -0.15 to -0.30 → Moderate Impact (class 2)
+                          # < -0.30 → Severe Impact (class 3)
+
+# ── Processing Options ───────────────────────────────────────────────────────
+processing:
+  mask_water: false          # mask permanent water bodies (JRC Global Surface Water)
+  mask_water_threshold: 80   # occurrence % above which a pixel is treated as water
+                             # 80 → removes open ocean/lakes while preserving tidal
+                             # flats, mangroves, and coastal wetlands
+
+# ── Sentinel-1 SAR Settings ──────────────────────────────────────────────────
+sar:
+  orbit: "DESCENDING"            # IW mode; DESCENDING preferred for FL coastline
+  speckle_filter_radius: 50      # focal_median radius in metres
+  thresholds:
+    rvi_change: -0.10            # ∆RVI threshold to flag structural change
+    vv_change_db: -1.5           # VV dB-change threshold (negative = loss)
+    vh_change_db: -1.5           # VH dB-change threshold (negative = loss)
+
+# ── GEDI Lidar Settings ───────────────────────────────────────────────────────
+gedi:
+  height_band: "rh95"            # canopy-top height (95th-percentile relative height)
+  cover_band: "cover"            # tree cover fraction (0–1)
+  sensitivity_threshold: 0.9    # minimum beam sensitivity for quality filtering
+  operational_start: "2019-04-01"
+  operational_end: "2023-03-31"
+
+# ── Multi-Sensor ─────────────────────────────────────────────────────────────
+sensors_default: "optical"       # optical | optical,sar | optical,sar,gedi | optical,sar,gedi,palsar | all
+
+# ── ALOS PALSAR-2 L-band SAR Settings ────────────────────────────────────────
+# Collection: JAXA/ALOS/PALSAR/YEARLY/SAR_EPOCH (annual mosaics, 25 m)
+# L-band (~24 cm) penetrates foliage → sensitive to trunk/branch structure
+palsar_settings:
+  calibration_offset: -83.0        # JAXA standard: dB = 10*log10(DN) - 83.0
+  forest_threshold_hv_db: -15.0    # HV dB below which pixel is considered non-forest
+  agb_A: 0.04                      # experimental AGB allometric coefficient A
+  agb_B: -2.0                      # experimental AGB allometric coefficient B
+                                   # AGB (Mg/ha) ≈ 10^((HV_dB + 83) * A + B)
+                                   # !! needs regional calibration before use !!
+
+# ── PALSAR Damage Classification Thresholds (∆HV dB) ─────────────────────────
+# Negative values = backscatter decrease = structural loss
+palsar_thresholds:
+  no_damage: -1.0       # ∆HV > -1.0 dB   → No Damage (class 0)
+  light_damage: -2.0    # -1.0 to -2.0 dB → Light Damage (class 1)
+  moderate_damage: -4.0 # -2.0 to -4.0 dB → Moderate Damage (class 2)
+                        # < -4.0 dB        → Severe Damage (class 3)
+
+# ── GeoTIFF Export ───────────────────────────────────────────────────────────
+export:
+  scale_sentinel2: 10    # native Sentinel-2 resolution (m)
+  scale_landsat: 30      # native Landsat resolution (m)
+  crs: "EPSG:4326"
+
+# ── Visualization ────────────────────────────────────────────────────────────
+visualization:
+  diff_colormap_min: -0.5   # diverging colormap bounds for delta layer
+  diff_colormap_max: 0.5
+  map_tiles: "CartoDB positron"
+
+# ── Florida Hurricane Presets ────────────────────────────────────────────────
+# Each entry: date (YYYY-MM-DD), bbox [west, south, east, north], description
+hurricanes:
+  frances:
+    date: "2004-09-05"
+    bbox: [-80.5, 27.0, -80.0, 27.5]
+    description: "Hurricane Frances (Cat 2) — Stuart / Treasure Coast"
+    notes: "Landfall near Hutchinson Island; second major hurricane to hit the Treasure Coast in 2004"
+
+  jeanne:
+    date: "2004-09-26"
+    bbox: [-80.5, 27.0, -80.0, 27.5]
+    description: "Hurricane Jeanne (Cat 3) — Stuart / Treasure Coast"
+    notes: "Made landfall almost exactly where Frances did three weeks earlier"
+
+  hermine:
+    date: "2016-09-02"
+    bbox: [-84.5, 29.8, -84.0, 30.3]
+    description: "Hurricane Hermine (Cat 1) — St. Marks / Wakulla County"
+    notes: "First FL landfall since Wilma (2005); storm surge in Big Bend marshes"
+
+  irma:
+    date: "2017-09-10"
+    bbox: [-81.5, 24.5, -80.3, 25.5]
+    description: "Hurricane Irma (Cat 4 at landfall) — Florida Keys / SW Florida"
+    notes: "Widespread mangrove and coastal vegetation damage"
+
+  michael:
+    date: "2018-10-10"
+    bbox: [-85.8, 29.9, -85.3, 30.3]
+    description: "Hurricane Michael (Cat 5) — Mexico Beach / Panama City"
+    notes: "Near-total canopy destruction from extreme winds + surge"
+
+  dorian:
+    date: "2019-09-03"
+    bbox: [-81.6, 30.3, -81.1, 30.7]
+    description: "Hurricane Dorian (Cat 1 FL effects) — NE Florida coast"
+    notes: "Cat 5 in Bahamas; grazed NE FL barrier islands causing surge and wind damage"
+
+  ian:
+    date: "2022-09-28"
+    bbox: [-82.2, 26.4, -81.7, 26.8]
+    description: "Hurricane Ian (Cat 4) — Fort Myers / Lee County"
+    notes: "Catastrophic storm surge on the SW Florida coast"
+
+  nicole:
+    date: "2022-11-10"
+    bbox: [-80.7, 27.4, -80.2, 27.8]
+    description: "Hurricane Nicole (Cat 1) — Vero Beach / Indian River County"
+    notes: "Rare November landfalling hurricane; coastal erosion and surge on Treasure Coast"
+
+  idalia:
+    date: "2023-08-30"
+    bbox: [-83.3, 29.0, -82.8, 29.5]
+    description: "Hurricane Idalia (Cat 3) — Cedar Key / Big Bend coast"
+    notes: "Surge impacts in low-lying coastal marshes"
+
+  debby:
+    date: "2024-08-05"
+    bbox: [-83.8, 29.5, -83.3, 30.0]
+    description: "Hurricane Debby (Cat 1) — Steinhatchee / Taylor County"
+    notes: "Slow-moving storm with extreme rainfall and surge in Big Bend region"
+
+  helene:
+    date: "2024-09-26"
+    bbox: [-83.7, 29.7, -83.2, 30.2]
+    description: "Hurricane Helene (Cat 4) — Keaton Beach / Perry / Taylor County"
+    notes: "Strongest Big Bend landfall on record; catastrophic surge up to 15-20 ft in coastal marshes and forests"
+
+  milton:
+    date: "2024-10-09"
+    bbox: [-82.5, 27.8, -81.8, 28.4]
+    description: "Hurricane Milton (Cat 3 at landfall) — Siesta Key / Sarasota"
+    notes: "Rapid intensification storm affecting central Gulf coast"
+
+# ── Hurricane Event Catalog (time series visualization markers) ───────────────
+# Used to auto-overlay vertical markers on time series charts whenever a
+# hurricane's date falls within the analysis period.
+# Add future events here — no code changes required.
+hurricane_events:
+  - name: Irma
+    date: "2017-09-10"
+    category: 4
+  - name: Michael
+    date: "2018-10-10"
+    category: 5
+  - name: Ian
+    date: "2022-09-28"
+    category: 4
+  - name: Idalia
+    date: "2023-08-30"
+    category: 3
+  - name: Helene
+    date: "2024-09-26"
+    category: 4
+  - name: Milton
+    date: "2024-10-09"
+    category: 4
+
+# ── Control Test ─────────────────────────────────────────────────────────────
+control:
+  orlando:
+    date: "2022-09-28"   # Same date as Ian
+    bbox: [-81.6, 28.3, -81.2, 28.7]
+    description: "Control — Central Florida (Orlando area)"
+    notes: "Should show no significant vegetation change (inland, no surge)"
